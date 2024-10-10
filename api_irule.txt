@@ -1,0 +1,137 @@
+# Made with care by a team of F5ers who love this technology
+# This iRule collects information on request headers, URI etc..
+# A prefix of z1_ has been added to each variable to make them globally unique
+# Version 2.8.3 (Complete iRule with flexible subsampling ratio - catch statements removed)
+
+when RULE_INIT {
+    set static::request_counter 0
+    # Process every 2nd request. Adjust this value as needed.
+    set static::subsample_ratio 2
+}
+
+when CLIENT_ACCEPTED {
+    # Increment the request counter and determine if this request should be processed
+    incr static::request_counter
+    set process_request [expr {$static::request_counter % $static::subsample_ratio == 0}]
+
+    if {$process_request} {
+        ###User-Edit Variables start###
+        set z1_logging logging-pool-tls ; #Name of LTM pool to use for remote logging servers 
+        set z1_remoteLogProtocol TCP ; #TCP for reliable transmission
+        set z1_globalStringLimit 200 ; #How many characters to collect from most HTTP values
+        set z1_uriStringLimit 400 ; #How many characters to collect from HTTP value of URI
+        ###User-Edit Variables end###
+
+        #Open socket to remote log destination 
+        set z1_hsl [HSL::open -proto $z1_remoteLogProtocol -pool $z1_logging]
+    }
+}
+
+when HTTP_REQUEST {
+    if {[info exists process_request] && $process_request} {
+        #Collect HTTP request data
+        set z1_virtual_server [virtual name]
+        set z1_clientsslprofile [PROFILE::clientssl name]
+        set z1_http_host [string range [HTTP::host] 0 $z1_globalStringLimit]
+        set z1_http_uri [string range [HTTP::uri] 0 $z1_uriStringLimit]
+        set z1_http_method [string range [HTTP::method] 0 $z1_globalStringLimit]
+        set z1_http_referrer [string range [HTTP::header "Referer"] 0 $z1_globalStringLimit]
+        set z1_req_content_type [string range [HTTP::header "Content-Type"] 0 $z1_globalStringLimit]
+        set z1_http_user_agent [string range [HTTP::header "User-Agent"] 0 $z1_globalStringLimit]
+        set z1_http_version [string range [HTTP::version] 0 $z1_globalStringLimit]
+        set z1_vip [IP::local_addr]
+        set z1_client_ip [IP::client_addr]
+        set z1_client_port [TCP::client_port]
+        if { [HTTP::header Content-Length] > 0 } then {
+            set z1_req_length [string range [HTTP::header "Content-Length"] 0 $z1_globalStringLimit]
+        } else {
+            set z1_req_length 0
+        }
+
+        # Check for Authorization header
+        if {[HTTP::header "Authorization"] ne ""} {
+            set z1_has_auth true
+        } else {
+            set z1_has_auth false
+        }
+
+        # Collect request headers as JSON
+        set z1_req_headers "{"
+        set first_header 1
+        foreach header_name [HTTP::header names] {
+            if {$header_name ne "Content-Type"} {
+                set header_value [HTTP::header $header_name]
+                if {!$first_header} {
+                    append z1_req_headers ","
+                }
+                append z1_req_headers "\"$header_name\":\"[URI::encode $header_value]\""
+                set first_header 0
+            }
+        }
+        append z1_req_headers " } "
+    }
+}
+
+when LB_SELECTED {
+    if {[info exists process_request] && $process_request} {
+        #Collect Pool and node data
+        set z1_pool [LB::server]
+    }
+}
+
+when HTTP_RESPONSE {
+    if {[info exists process_request] && $process_request} {
+        #Collect HTTP response data
+        set z1_http_status [string range [HTTP::status] 0 $z1_globalStringLimit]
+        if { [HTTP::header Content-Length] > 0 } then {
+           set z1_res_length [string range [HTTP::header "Content-Length"] 0 $z1_globalStringLimit]
+        } else {
+           set z1_res_length 0
+        }
+
+        # Collect response Content-Type
+        set z1_res_content_type [string range [HTTP::header "Content-Type"] 0 $z1_globalStringLimit]
+
+        # Collect response headers as JSON
+        set z1_res_headers "{"
+        set first_header 1
+        foreach header_name [HTTP::header names] {
+            if {$header_name ne "Content-Type"} {
+                set header_value [HTTP::header $header_name]
+                if {!$first_header} {
+                    append z1_res_headers ","
+                }
+                append z1_res_headers "\"$header_name\":\"[URI::encode $header_value]\""
+                set first_header 0
+            }
+        }
+        append z1_res_headers " } "
+
+        # Generate RFC 5424 compliant syslog message
+        set pri "<118>" ; # Facility 16 (local0), Severity 6 (Informational)
+        set version "1" ; # Version of the syslog protocol specification
+
+        # RFC 5424 compliant timestamp
+        set now [clock seconds]
+        set timestamp [clock format $now -format "%Y-%m-%dT%T.000Z" -gmt true]
+
+        set hostname [info hostname]
+        set appname "F5-API-Discovery"
+        set procid "-"
+        set msgid "-"
+        set sd "-" ; # Structured data, using '-' as we don't have any
+
+        set base_msg "$pri$version $timestamp $hostname $appname $procid $msgid $sd"
+
+        #json format
+        set msg " {\"uri\":\"$z1_http_uri\",\"host\":\"$z1_http_host\",\"method\":\"$z1_http_method\",\"statusCode\":\"$z1_http_status\",\"reqCType\":\"$z1_req_content_type\",\"resCType\":\"$z1_res_content_type\",\"httpv\":\"$z1_http_version\",\"hasAuthorization\":$z1_has_auth"
+
+        #line break for Loki
+        set final_message "$base_msg$msg}\n"
+
+        HSL::send $z1_hsl $final_message
+
+        #clear all variables
+        unset -nocomplain z1_http_uri z1_http_host z1_http_method z1_req_length z1_http_status z1_res_length z1_virtual_server z1_http_referrer z1_req_content_type z1_res_content_type z1_http_user_agent z1_http_version z1_vip z1_clientsslprofile z1_client_ip z1_client_port z1_payload z1_req_headers z1_res_headers z1_has_auth
+    }
+}

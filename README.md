@@ -79,7 +79,7 @@ Disk space used likewise depends on volume, but clickhouse provides a good amoun
 ### Installation
 
 #### BigIP iRule Configuration
-Contact your F5 Sales Rep for a copy of the iRule and instructions for installing it on your desired virtual servers.
+The [api_irule.txt](api_irule.txt) file in this directory is required for exporting the data to the api discovery containers.
 
 #### Analysis Instance Configuration
 Clone the repo or download source tarball from the [release](https://github.com/f5devcentral/ast-api-discovery/releases) section.

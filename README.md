@@ -78,8 +78,33 @@ Disk space used likewise depends on volume, but clickhouse provides a good amoun
 
 ### Installation
 
-#### BigIP iRule Configuration
-The [api_irule.txt](api_irule.txt) file in this directory is required for exporting the data to the api discovery containers.
+#### BigIP Virtual Server and iRule Configuration
+
+
+1. Create a Standard Virtual Server, with port 6514
+
+<img src="./diagrams/vs_config.png" width="900px">
+
+2. Create a Pool, with the Member being the Virtual Server created above - Service port 6514
+
+<img src="./diagrams/pool_config.png" width="900px">
+
+4. Create another pool, with the containerized API discovery tool being the node member and assign this to the virtual server created in step #1
+
+<img src="./diagrams/pool_config2.png" width="900px">
+
+3. Attach the iRule to the virtual server that is receiving web traffic and set the variables to point to the pool created in step #2 (This will be a pool with the Virtual Server)The [api_irule.txt](api_irule.txt) file in this directory is required for exporting the data to the api discovery containers.
+
+<img src="./diagrams/irule_vars.png" width="900px">
+
+The flow of traffic is such:
+1. Virtual Server receiving web traffic
+2. The iRule attached will pass traffic to a pool (variable in iRule) that includes a Virtual Server created for syslogtls
+3. The Virtual Server will send the data to the otel container
+4. Dashboards will be presented via Grafana
+
+
+
 
 #### Analysis Instance Configuration
 Clone the repo or download source tarball from the [release](https://github.com/f5devcentral/ast-api-discovery/releases) section.

@@ -1,0 +1,120 @@
+version: '3'
+
+volumes:
+  prometheus_ladt:
+  grafana_ladt:
+  clickhouse_ladt:
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    stop_grace_period: 5m
+    volumes:
+      - ./services/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_ladt:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--enable-feature=otlp-write-receiver'
+      - '--storage.tsdb.retention.time=1y'
+    networks:
+      - api_discovery_tool
+
+  otel-collector:
+    image: ghcr.io/f5devcentral/application-study-tool/otel_custom_collector:v0.4.0
+    restart: unless-stopped
+    volumes:
+      - ./services/otel_collector:/etc/otel-collector-config
+    command: ["--config=/etc/otel-collector-config/config.yaml"]
+    env_file:
+      - ".env"
+      - ".env.device-secrets"
+    environment:
+      CLICKHOUSE_PASSWORD: ${OTEL_COLLECTOR_CLICKHOUSE_PASSWORD}
+    ports:
+      - 514:54526/udp
+      - 6514:54526
+    networks:
+      - api_discovery_tool
+    depends_on:
+        clickhouse:
+            condition: service_healthy
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    ports:
+      - 3000:3000
+    volumes:
+      - grafana_ladt:/var/lib/grafana
+      - ./services/grafana/provisioning/:/etc/grafana/provisioning
+    env_file: ".env"
+    environment:
+      CLICKHOUSE_PASSWORD: ${GRAFANA_CLICKHOUSE_PASSWORD} 
+    networks:
+      - api_discovery_tool
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.4
+    user: "101:101"
+    cap_add:
+    - SYS_NICE
+    - NET_ADMIN
+    - IPC_LOCK
+    hostname: clickhouse
+    volumes:
+      - ./services/clickhouse/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./services/clickhouse/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+      - ./services/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+      - clickhouse_ladt:/var/lib/clickhouse
+    env_file: ".env"
+    environment:
+      GRAFANA_CLICKHOUSE_PASSWORD: ${GRAFANA_CLICKHOUSE_PASSWORD}
+      ANALYZER_CLICKHOUSE_PASSWORD: ${ANALYZER_CLICKHOUSE_PASSWORD}
+      OTEL_COLLECTOR_CLICKHOUSE_PASSWORD: ${OTEL_COLLECTOR_CLICKHOUSE_PASSWORD}
+    networks:
+      - api_discovery_tool
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+
+  log-analyzer:
+    image: ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer/api_discovery_log_analyzer:v0.1.0
+    restart: unless-stopped
+    environment:
+      # Default will run at 1 hour interval or every access logs fetch limit
+      ACCESS_LOGS_FETCH_LIMIT: 3000000
+      # Check to see if log limit or max interval reached every X seconds
+      ACCESS_LOGS_COUNT_CHECK_INTERVAL_SECONDS: 30
+      # Run at least every 2 hours
+      DATA_ANALYSIS_MAX_INTERVAL_SECONDS: 7200
+      # Run at most every 5 minutes
+      DATA_ANALYSIS_MIN_INTERVAL_SECONDS: 300
+      # If ACCESS_LOGS_FETCH_LIMIT logs have arrived since last analysis and it's been
+      # more than DATA_ANALYSIS_MIN_INTERVAL_SECONDS, run the analysis
+      DATA_ANALYSIS_AT_FETCH_LIMIT: "True"
+      # If there are no prior analysis runs, look back at most X seconds
+      DATA_ANALYSIS_MAX_FETCH_INTERVAL_SECONDS: 7200
+      CLICKHOUSE_USE_TLS: "False"   #TODO: Default True
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PASSWORD: ${ANALYZER_CLICKHOUSE_PASSWORD}
+    networks:
+      - api_discovery_tool
+
+  # loadgenerator:
+  #   image: locustio/locust
+  #   container_name: load-generator
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 120M
+  #   volumes:
+  #     - ./:/mnt/locust
+  #   restart: unless-stopped
+  #   ports:
+  #     - 8089:8089
+  #   command: --loglevel DEBUG -f /mnt/locust/locustfile.py --host https://nginx.f5kc.com
+networks:
+  api_discovery_tool:

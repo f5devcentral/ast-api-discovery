@@ -1,0 +1,44 @@
+# These files do nothing, actual table creation in ../docker-entrypoint-initdb.d
+CREATE TABLE otel.cbip_access_logs
+(
+`Timestamp` DateTime,
+`TraceId` String CODEC(ZSTD(1)),
+`SpanId` String CODEC(ZSTD(1)),
+`TraceFlags` UInt8,
+`SeverityText` LowCardinality(String) CODEC(ZSTD(1)),
+`SeverityNumber` UInt8,
+`ServiceName` LowCardinality(String) CODEC(ZSTD(1)),
+`Body` String CODEC(ZSTD(1)),
+`ResourceSchemaUrl` LowCardinality(String) CODEC(ZSTD(1)),
+`ResourceAttributes` Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+`ScopeSchemaUrl` LowCardinality(String) CODEC(ZSTD(1)),
+`ScopeName` String CODEC(ZSTD(1)),
+`ScopeVersion` LowCardinality(String) CODEC(ZSTD(1)),
+`ScopeAttributes` Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+`LogAttributes` Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+`cIP` String CODEC(ZSTD(1)),
+`cPort` UInt16,
+`uri` String CODEC(ZSTD(1)),
+`path` String CODEC(ZSTD(1)),
+`queryString` String CODEC(ZSTD(1)),
+`host` LowCardinality(String) CODEC(ZSTD(1)),
+`method` LowCardinality(String) CODEC(ZSTD(1)),
+`reqLength` UInt32,
+`statusCode`UInt16,
+`resLength` UInt32,
+`vs` LowCardinality(String) CODEC(ZSTD(1)),
+`pool` LowCardinality(String) CODEC(ZSTD(1)),
+`referrer` String CODEC(ZSTD(1)),
+`cType` LowCardinality(String) CODEC(ZSTD(1)),
+`hostname` LowCardinality(String) CODEC(ZSTD(1)),
+`userAgent` LowCardinality(String) CODEC(ZSTD(1)),
+`httpv` LowCardinality(String) CODEC(ZSTD(1)),
+`vip` LowCardinality(String) CODEC(ZSTD(1)),
+`clientsslprofile` LowCardinality(String) CODEC(ZSTD(1)),
+`responseHeaders` String CODEC(ZSTD(1)),
+`requestHeaders` String CODEC(ZSTD(1)),
+`payload` String CODEC(ZSTD(1))
+)
+ENGINE = MergeTree
+ORDER BY (ServiceName, Timestamp)
+TTL Timestamp + INTERVAL 6 HOUR

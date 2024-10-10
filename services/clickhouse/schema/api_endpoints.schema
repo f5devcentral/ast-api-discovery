@@ -1,0 +1,15 @@
+# These files do nothing, actual table creation in ../docker-entrypoint-initdb.d
+CREATE TABLE api_detection.detected_api_endpoints
+(
+`Timestamp` DateTime,
+`path` String CODEC(ZSTD(1)),
+`host` LowCardinality(String) CODEC(ZSTD(1)),
+`method` LowCardinality(String) CODEC(ZSTD(1)),
+`isAuthenticated` LowCardinality(String) CODEC(ZSTD(1)),
+`accesses` UInt64,
+`auth_headers_seen` UInt64,
+`auth_errors` UInt64,
+)
+ENGINE = MergeTree
+ORDER BY (accesses, Timestamp)
+TTL Timestamp + INTERVAL 6 HOUR

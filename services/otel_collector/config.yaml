@@ -1,0 +1,71 @@
+receivers:
+  syslog:
+    udp:
+      listen_address: "0.0.0.0:54526"
+    operators:
+    - type: json_parser
+      parse_from: attributes.message
+    protocol: rfc5424
+    location: UTC
+  syslog/tcp:
+    tcp:
+      listen_address: "0.0.0.0:54526"
+      tls:
+        ca_file: /etc/otel-collector-config/ssl/ca.pem
+        cert_file: /etc/otel-collector-config/ssl/cert.pem
+        key_file: /etc/otel-collector-config/ssl/key.pem
+    operators:
+    - type: json_parser
+      parse_from: attributes.message
+    protocol: rfc5424
+    location: UTC
+  prometheus/collector:
+    config:
+      scrape_configs:
+        - job_name: 'opentelemetry-collector'
+          static_configs:
+            - targets: ['localhost:8888']
+
+processors:
+  batch:
+  batch/clickhouse:
+    timeout: 5s
+    send_batch_size: 5000
+
+exporters:
+  otlphttp/metrics:
+    endpoint: http://prometheus:9090/api/v1/otlp
+  logging/debug:
+    verbosity: detailed
+  logging:
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    database: otel
+    async_insert: true
+    ttl: 72h
+    compress: lz4
+    create_schema: false
+    logs_table_name: otel_logs_null
+    traces_table_name: otel_traces
+    metrics_table_name: otel_metrics
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 5s
+      max_elapsed_time: 30s
+      username: otel
+      password: ${env:CLICKHOUSE_PASSWORD}
+
+service:
+  pipelines:
+    metrics/otel:
+      receivers: [prometheus/collector]
+      processors: [batch]
+      exporters: [logging, otlphttp/metrics]
+    logs/clickhouse:
+      receivers: [syslog,syslog/tcp]
+      processors: [batch/clickhouse]
+      exporters: [logging, clickhouse]

@@ -81,7 +81,7 @@ services:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
 
   log-analyzer:
-    image: ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer/api_discovery_log_analyzer:v0.1.0
+    image: ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer:v0.1.0
     restart: unless-stopped
     environment:
       # Default will run at 1 hour interval or every access logs fetch limit

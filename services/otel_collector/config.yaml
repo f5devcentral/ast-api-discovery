@@ -56,8 +56,8 @@ exporters:
       initial_interval: 5s
       max_interval: 5s
       max_elapsed_time: 30s
-      username: otel
-      password: ${env:CLICKHOUSE_PASSWORD}
+    username: otel
+    password: ${env:CLICKHOUSE_PASSWORD}
 
 service:
   pipelines:

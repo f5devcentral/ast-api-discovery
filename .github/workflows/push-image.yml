@@ -31,7 +31,7 @@ jobs:
       - name: Push to Github
         run:
           |
-            docker tag registry.gitlab.com/f5/greenhouse/apps/api-discovery-log-analyzer/api_discovery_log_analyzer:${{ env.VERSION }} ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer/api_discovery_log_analyzer:${{ env.VERSION }}
-            docker tag registry.gitlab.com/f5/greenhouse/apps/api-discovery-log-analyzer/api_discovery_log_analyzer:${{ env.VERSION }} ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer/api_discovery_log_analyzer:latest
-            docker push ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer/api_discovery_log_analyzer:${{ env.VERSION }}
-            docker push ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer/api_discovery_log_analyzer:latest
+            docker tag registry.gitlab.com/f5/greenhouse/apps/api-discovery-log-analyzer/api_discovery_log_analyzer:${{ env.VERSION }} ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer:${{ env.VERSION }}
+            docker tag registry.gitlab.com/f5/greenhouse/apps/api-discovery-log-analyzer/api_discovery_log_analyzer:${{ env.VERSION }} ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer:latest
+            docker push ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer:${{ env.VERSION }}
+            docker push ghcr.io/f5devcentral/ast-api-discovery/api_discovery_log_analyzer:latest

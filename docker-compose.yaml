@@ -102,6 +102,9 @@ services:
       CLICKHOUSE_PASSWORD: ${ANALYZER_CLICKHOUSE_PASSWORD}
     networks:
       - api_discovery_tool
+    depends_on:
+        clickhouse:
+            condition: service_healthy
 
   # loadgenerator:
   #   image: locustio/locust

@@ -25,14 +25,13 @@ services:
       - api_discovery_tool
 
   otel-collector:
-    image: ghcr.io/f5devcentral/application-study-tool/otel_custom_collector:v0.4.0
+    image: ghcr.io/f5devcentral/application-study-tool/otel_custom_collector:v0.7.0
     restart: unless-stopped
     volumes:
       - ./services/otel_collector:/etc/otel-collector-config
     command: ["--config=/etc/otel-collector-config/config.yaml"]
     env_file:
       - ".env"
-      - ".env.device-secrets"
     environment:
       CLICKHOUSE_PASSWORD: ${OTEL_COLLECTOR_CLICKHOUSE_PASSWORD}
     ports:
@@ -43,6 +42,7 @@ services:
     depends_on:
         clickhouse:
             condition: service_healthy
+
   grafana:
     image: grafana/grafana:11.2.0
     restart: unless-stopped

@@ -13,6 +13,12 @@ clickhouse client -nm <<-EOSQL
         accesses UInt64,
         auth_headers_seen UInt64,
         auth_errors UInt64,
+        sensitive_headers_seen UInt64,
+        sensitive_payload_seen UInt64,
+        ssn_seen UInt64,
+        dob_seen UInt64,
+        creditcard_seen UInt64,
+        email_seen UInt64,
     ) 
     ENGINE = MergeTree 
     ORDER BY (accesses, Timestamp)

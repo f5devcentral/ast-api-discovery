@@ -1,67 +1,4 @@
 {
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "description": "",
-      "type": "datasource",
-      "pluginId": "prometheus",
-      "pluginName": "Prometheus"
-    },
-    {
-      "name": "DS_CLICKHOUSE",
-      "label": "ClickHouse",
-      "description": "",
-      "type": "datasource",
-      "pluginId": "grafana-clickhouse-datasource",
-      "pluginName": "ClickHouse"
-    }
-  ],
-  "__elements": {},
-  "__requires": [
-    {
-      "type": "grafana",
-      "id": "grafana",
-      "name": "Grafana",
-      "version": "11.2.0"
-    },
-    {
-      "type": "datasource",
-      "id": "grafana-clickhouse-datasource",
-      "name": "ClickHouse",
-      "version": "4.4.0"
-    },
-    {
-      "type": "panel",
-      "id": "piechart",
-      "name": "Pie chart",
-      "version": ""
-    },
-    {
-      "type": "datasource",
-      "id": "prometheus",
-      "name": "Prometheus",
-      "version": "1.0.0"
-    },
-    {
-      "type": "panel",
-      "id": "stat",
-      "name": "Stat",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "table",
-      "name": "Table",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "timeseries",
-      "name": "Time series",
-      "version": ""
-    }
-  ],
   "annotations": {
     "list": [
       {
@@ -81,7 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": null,
+  "id": 3,
   "links": [],
   "panels": [
     {
@@ -689,8 +626,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
-                    "value": null
+                    "color": "green"
                   },
                   {
                     "color": "red",
@@ -915,8 +851,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "blue",
-                    "value": null
+                    "color": "blue"
                   }
                 ]
               },
@@ -1014,8 +949,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
-                    "value": null
+                    "color": "green"
                   },
                   {
                     "color": "red",
@@ -1117,8 +1051,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
-                    "value": null
+                    "color": "green"
                   },
                   {
                     "color": "red",
@@ -1221,8 +1154,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
-                    "value": null
+                    "color": "green"
                   },
                   {
                     "color": "red",
@@ -1355,8 +1287,7 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
-                    "value": null
+                    "color": "green"
                   },
                   {
                     "color": "red",
@@ -1461,7 +1392,7 @@
     },
     {
       "datasource": {
-        "name": "${DS_CLICKHOUSE}",
+        "default": false,
         "type": "grafana-clickhouse-datasource",
         "uid": "${DS_CLICKHOUSE}"
       },
@@ -1548,6 +1479,30 @@
                 "value": {
                   "type": "color-text"
                 }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Path"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 520
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.* Present/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
               }
             ]
           }
@@ -1708,9 +1663,9 @@
               "table": "detected_api_endpoints"
             }
           },
-          "pluginVersion": "4.4.0",
+          "pluginVersion": "4.5.0",
           "queryType": "table",
-          "rawSql": "SELECT path, host, method, isAuthenticated, accesses FROM \"api_detection\".\"detected_api_endpoints\" t1 WHERE Timestamp = (SELECT MAX(Timestamp) from \"api_detection\".\"detected_api_endpoints\" t2) AND host LIKE '${host}' AND startsWith(path, '$path_prefix' ) ORDER BY accesses DESC LIMIT 1000",
+          "rawSql": "SELECT\n  path,\n  host,\n  method,\n  isAuthenticated,\n  sensitive_headers_seen / accesses as sensitive_headers_seen,\n  sensitive_payload_seen / accesses as sensitive_payload_seen,\n  -- ssn_seen / accesses as ssn_seen,\n  -- creditcard_seen / accesses as creditcard_seen,\n  -- dob_seen / accesses as dob_seen,\n  -- email_seen / accesses as email_seen,\n  accesses,\n  arrayStringConcat(\n        arrayFilter(\n\n            x -> x IS NOT NULL,\n            [\n                (if(ssn_seen > 0, 'SSN', null)),\n                (if(dob_seen > 0, 'DOB', null)),\n                (if(creditcard_seen > 0, 'Credit Card', null)),\n                (if(email_seen > 0, 'Email', null))\n            ]\n        ),\n        ', '\n  ) AS seen_data_types\nFROM \"api_detection\".\"detected_api_endpoints\" t1 WHERE Timestamp = (SELECT MAX(Timestamp) from \"api_detection\".\"detected_api_endpoints\" t2) AND host LIKE '${host}' AND startsWith(path, '$path_prefix' )  AND accesses > 0 ORDER BY accesses DESC LIMIT 1000",
           "refId": "A"
         }
       ],
@@ -1722,18 +1677,29 @@
             "excludeByName": {},
             "includeByName": {},
             "indexByName": {
-              "accesses": 4,
+              "accesses": 7,
               "host": 0,
               "isAuthenticated": 3,
               "method": 1,
-              "path": 2
+              "path": 2,
+              "seen_data_types": 6,
+              "sensitive_headers_seen": 4,
+              "sensitive_payload_seen": 5
             },
             "renameByName": {
               "accesses": "Requests",
+              "creditcard_seen": "Creditcard Present",
+              "dob_seen": "DOB Present",
+              "email_seen": "Email Present",
               "host": "Host",
               "isAuthenticated": "Authentication Detected",
               "method": "Method",
-              "path": "Path"
+              "path": "Path",
+              "seen_data_types": "Sensitive Data Types",
+              "sensitive_headers_seen": "Sensitive Headers Present",
+              "sensitive_payload_seen": "Sensitive Body Present",
+              "sensitive_seen": "Sensitive Data Present",
+              "ssn_seen": "SSN Present"
             }
           }
         }
@@ -1747,7 +1713,11 @@
   "templating": {
     "list": [
       {
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "ClickHouse",
+          "value": "PDEE91DDB90597936"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Clickhouse",
@@ -1761,7 +1731,11 @@
         "type": "datasource"
       },
       {
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "PBFA97CFB590B2093"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Prometheus",
@@ -1775,7 +1749,11 @@
         "type": "datasource"
       },
       {
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "nginx.f5kc.com",
+          "value": "nginx.f5kc.com"
+        },
         "datasource": {
           "type": "grafana-clickhouse-datasource",
           "uid": "${DS_CLICKHOUSE}"
@@ -1824,6 +1802,6 @@
   "timezone": "browser",
   "title": "API Detection",
   "uid": "bdy1jayi74npce",
-  "version": 40,
+  "version": 5,
   "weekStart": ""
 }

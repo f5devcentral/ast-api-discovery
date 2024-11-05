@@ -1,113 +1,448 @@
-# Made with care by a team of F5ers who love this technology
-# This iRule collects information on request headers, URI etc..
+# Made with care by a team of F5ers who love this technology (MPW, MS)
+# This iRule scans information sent via headers, URI etc..
+# It also checks for SSN, DOB, email, IP address, API keys, and UUIDs
+# It now detects payload types: REST, SOAP, GraphQL, XML, and gRPC
+# Before production release, please add catch statements
 # A prefix of z1_ has been added to each variable to make them globally unique
-# Version 2.8.3 (Complete iRule with flexible subsampling ratio - catch statements removed)
+# Version 3.7 - Added processing counter to run every third request
 
 when RULE_INIT {
+    # Initialize counter for processing every third request
     set static::request_counter 0
-    # Process every 2nd request. Adjust this value as needed.
-    set static::subsample_ratio 2
+   
+    set static::luhn_check {
+        set sum 0
+        set alternate 0
+        set card_number [string map {" " ""} $card_number]
+        
+        for {set i [string length $card_number]} {$i > 0} {incr i -1} {
+            set digit [string index $card_number [expr {$i - 1}]]
+            set digit [scan $digit %d]
+            
+            if {$alternate} {
+                set digit [expr {$digit * 2}]
+                if {$digit > 9} {
+                    set digit [expr {$digit - 9}]
+                }
+            }
+            
+            set sum [expr {$sum + $digit}]
+            set alternate [expr {!$alternate}]
+        }
+        
+        expr {$sum % 10 == 0}
+    }
 }
 
 when CLIENT_ACCEPTED {
-    # Increment the request counter and determine if this request should be processed
+
+    ###User-Edit Variables start###
+    set z1_logging logging-pool-tls ; #Name of LTM pool to use for remote logging servers 
+    set z1_remoteLogProtocol TCP ; #TCP for reliable transmission
+    ###User-Edit Variables end###
+
+    # Increment and check counter
     incr static::request_counter
-    set process_request [expr {$static::request_counter % $static::subsample_ratio == 0}]
+    if {$static::request_counter >= 3} {
+        set static::request_counter 0
+    #Open socket to remote log destination 
+    set z1_hsl [HSL::open -proto $z1_remoteLogProtocol -pool $z1_logging]
 
-    if {$process_request} {
-        ###User-Edit Variables start###
-        set z1_logging logging-pool-tls ; #Name of LTM pool to use for remote logging servers 
-        set z1_remoteLogProtocol TCP ; #TCP for reliable transmission
-        set z1_globalStringLimit 200 ; #How many characters to collect from most HTTP values
-        set z1_uriStringLimit 400 ; #How many characters to collect from HTTP value of URI
-        ###User-Edit Variables end###
-
-        #Open socket to remote log destination 
-        set z1_hsl [HSL::open -proto $z1_remoteLogProtocol -pool $z1_logging]
     }
 }
 
 when HTTP_REQUEST {
-    if {[info exists process_request] && $process_request} {
-        #Collect HTTP request data
-        set z1_virtual_server [virtual name]
-        set z1_clientsslprofile [PROFILE::clientssl name]
-        set z1_http_host [string range [HTTP::host] 0 $z1_globalStringLimit]
-        set z1_http_uri [string range [HTTP::uri] 0 $z1_uriStringLimit]
-        set z1_http_method [string range [HTTP::method] 0 $z1_globalStringLimit]
-        set z1_http_referrer [string range [HTTP::header "Referer"] 0 $z1_globalStringLimit]
-        set z1_req_content_type [string range [HTTP::header "Content-Type"] 0 $z1_globalStringLimit]
-        set z1_http_user_agent [string range [HTTP::header "User-Agent"] 0 $z1_globalStringLimit]
-        set z1_http_version [string range [HTTP::version] 0 $z1_globalStringLimit]
-        set z1_vip [IP::local_addr]
-        set z1_client_ip [IP::client_addr]
-        set z1_client_port [TCP::client_port]
-        if { [HTTP::header Content-Length] > 0 } then {
-            set z1_req_length [string range [HTTP::header "Content-Length"] 0 $z1_globalStringLimit]
-        } else {
-            set z1_req_length 0
-        }
+    if {$static::request_counter != 0} {
+    return
+    }
+    
 
-        # Check for Authorization header
-        if {[HTTP::header "Authorization"] ne ""} {
-            set z1_has_auth true
-        } else {
-            set z1_has_auth false
-        }
+    set z1_sensitive_in_payload false
 
-        # Collect request headers as JSON
-        set z1_req_headers "{"
-        set first_header 1
+    #Collect HTTP request data
+    set z1_virtual_server [virtual name]
+    set z1_clientsslprofile [PROFILE::clientssl name]
+    set z1_http_host [HTTP::host]
+    set z1_http_uri [HTTP::uri]
+    set z1_http_method [HTTP::method]
+    set z1_http_referrer [HTTP::header "Referer"]
+    set z1_req_content_type [HTTP::header "Content-Type"]
+    set z1_http_user_agent [HTTP::header "User-Agent"]
+    set z1_http_version [HTTP::version]
+    set z1_vip [IP::local_addr]
+    set z1_client_ip [IP::client_addr]
+    set z1_client_port [TCP::client_port]
+
+    # Initialize z1_sensitive_data_types and z1_payload_type
+    set z1_sensitive_data_types [list]
+    set z1_payload_type "Unknown"
+    
+
+    # Scan for Authorization header
+    if {[HTTP::header "Authorization"] ne ""} {
+        set z1_has_auth true
+    } else {
+        set z1_has_auth false
+    }
+
+    # Scan full payload - if Content-Length is present and valid
+    if { [HTTP::header "Content-Length"] ne "" } {
+        set z1_req_length [HTTP::header "Content-Length"]
+        if { [string is integer -strict $z1_req_length] && $z1_req_length > 0 } {
+            HTTP::collect $z1_req_length
+        }
+    } else {
+        set z1_req_length 0
+    }
+
+        # Scan all headers
+
         foreach header_name [HTTP::header names] {
-            if {$header_name ne "Content-Type"} {
-                set header_value [HTTP::header $header_name]
-                if {!$first_header} {
-                    append z1_req_headers ","
+        set header_value [HTTP::header $header_name]
+
+        # Per SSA rules, first three digits must be between 001-899
+        # Cannot be 000, 666, or 900-999
+        # SSN check with stricter validation
+        if {[scan $header_value {%3d-%2d-%4d} d1 d2 d3] == 3} {
+        # Check if the first part looks like a month (1-12)
+        if {$d1 >= 1 && $d1 <= 12} {
+        # Skip SSN check if it looks like a date
+        # Don't return - continue checking other patterns
+        } else {
+        # SSN validation rules
+        if {$d1 >= 1 && $d1 <= 899 && 
+            $d1 != 666 && 
+            $d2 >= 1 && $d2 <= 99 && 
+            $d3 >= 1 && $d3 <= 9999} {
+            if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
+                lappend z1_sensitive_data_types "SSN"
+                    }
                 }
-                append z1_req_headers "\"$header_name\":\"[URI::encode $header_value]\""
-                set first_header 0
             }
         }
-        append z1_req_headers " } "
+        if {[scan $header_value "%d" cc_number] == 1} {
+            set cc_length [string length $cc_number]
+            if {$cc_length >= 13 && $cc_length <= 19} {
+                set card_number $cc_number
+                if {[eval $static::luhn_check]} {
+                    if {[lsearch $z1_sensitive_data_types "CreditCard"] == -1} {
+                        lappend z1_sensitive_data_types "CreditCard"
+                    }
+                }
+            }
+        }
+        if {[regexp {[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}} $header_value]} {
+            if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
+                lappend z1_sensitive_data_types "Email"
+            }
+        }
+        # DOB check - with international format support
+        if {([scan $header_value {%d/%d/%d} month day year] == 3 || 
+        [scan $header_value {%d-%d-%d} month day year] == 3 || 
+        [scan $header_value {%d.%d.%d} month day year] == 3 ||
+        [scan $header_value {%4d-%2d-%2d} year month day] == 3)} {  # Added international format
+    
+        # For US format dates, year might be 2 digits or 4 digits
+        if {[string length $year] == 2} {
+        # Convert 2-digit year to 4-digit
+        set year [expr {$year < 50 ? $year + 2000 : $year + 1900}]
+        }
+    
+        if {($month >= 1 && $month <= 12) && 
+        ($day >= 1 && $day <= 31) && 
+        ($year >= 1900 && $year <= 2099)} {
+        if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
+            lappend z1_sensitive_data_types "DOB"
+                }
+            }
+        }      
+
+    }
+    # Log summary of findings in headers
+    set z1_sensitive_in_headers [expr {[llength $z1_sensitive_data_types] > 0 ? "true" : "false"}]
+    }
+
+    when HTTP_REQUEST_DATA {
+
+   # Add counter check at the beginning
+    if {$static::request_counter != 0} {
+        return
+    }
+    # Initialize sensitive data types array if not exists
+    if {![info exists z1_sensitive_data_types]} {
+        set z1_sensitive_data_types [list]
+    }
+
+    if {[HTTP::payload length] > 0} {
+        set z1_payload [HTTP::payload]
+        # First check for raw data patterns before payload type determination
+        # Raw SSN Check
+        if {[regexp {(\d{3}-\d{2}-\d{4})} $z1_payload -> ssn]} {
+            if {[scan $ssn {%d-%d-%d} d1 d2 d3] == 3} {
+                if {$d1 >= 1 && $d1 <= 899 && 
+                    $d1 != 666 && 
+                    $d2 >= 1 && $d2 <= 99 && 
+                    $d3 >= 1 && $d3 <= 9999} {
+                    if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
+                        lappend z1_sensitive_data_types "SSN"
+                        set z1_sensitive_in_payload true
+                    }
+                }
+            }
+        }
+
+        # Raw Credit Card Check
+        if {[regexp {\d{13,19}} $z1_payload cc_number]} {
+            set card_number $cc_number
+            if {[eval $static::luhn_check]} {
+                if {[lsearch $z1_sensitive_data_types "CreditCard"] == -1} {
+                    lappend z1_sensitive_data_types "CreditCard"
+                    set z1_sensitive_in_payload true
+                }
+            }
+        }
+        
+        # Raw Email Check
+        if {[regexp {([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})} $z1_payload -> email]} {
+            if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
+                lappend z1_sensitive_data_types "Email"
+                set z1_sensitive_in_payload true
+            }
+        }
+
+        # DOB check - with international format support
+        if {([scan $z1_payload {%d/%d/%d} month day year] == 3 || 
+        [scan $z1_payload {%d-%d-%d} month day year] == 3 || 
+        [scan $z1_payload {%d.%d.%d} month day year] == 3 ||
+        [scan $z1_payload {%4d-%2d-%2d} year month day] == 3)} {  # Added international format
+    
+        # For US format dates, year might be 2 digits or 4 digits
+        if {[string length $year] == 2} {
+        # Convert 2-digit year to 4-digit
+        set year [expr {$year < 50 ? $year + 2000 : $year + 1900}]
+        }
+    
+        if {($month >= 1 && $month <= 12) && 
+        ($day >= 1 && $day <= 31) && 
+        ($year >= 1900 && $year <= 2099)} {
+        if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
+            lappend z1_sensitive_data_types "DOB"
+            set z1_sensitive_in_payload true
+                }
+            }
+        }      
+        
+        # Determine payload type
+        set z1_payload_type "Unknown"
+        
+        # Check for gRPC
+        if {[HTTP::version] eq "2.0" && [HTTP::header "Content-Type"] eq "application/grpc"} {
+            set z1_payload_type "gRPC"
+
+        # Check for REST/JSON
+        } elseif {[string first "\[" [string trimleft $z1_payload]] == 0} {
+            set z1_payload_type "REST_ARRAY"
+
+        } elseif {[string first "\{" [string trimleft $z1_payload]] == 0} {
+            set z1_payload_type "REST"
+
+        # Check for SOAP
+        } elseif {[string first "<soap" $z1_payload] != -1} {
+            set z1_payload_type "SOAP"
+
+        # Check for XML
+        } elseif {[string first "<?xml" $z1_payload] == 0} {
+            set z1_payload_type "XML"
+
+        }
+        
+        switch $z1_payload_type {
+            "REST" - "REST_ARRAY" {
+                # JSON Processing with regex
+                set start_index 0
+                while {$start_index < [string length $z1_payload]} {
+                    # SSN Check
+                    if {[regexp -start $start_index {"ssn":\s*"(\d{3}-\d{2}-\d{4})"} $z1_payload -> ssn]} {
+                        if {[scan $ssn {%d-%d-%d} d1 d2 d3] == 3} {
+                            if {$d1 >= 1 && $d1 <= 899 && 
+                                $d1 != 666 && 
+                                $d2 >= 1 && $d2 <= 99 && 
+                                $d3 >= 1 && $d3 <= 9999} {
+                                if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
+                                    lappend z1_sensitive_data_types "SSN"
+
+                                }
+                            }
+                        }
+                        set start_index [expr {[string first $ssn $z1_payload $start_index] + [string length $ssn]}]
+                    }
+
+                    # DOB Check
+                    if {[regexp -start $start_index {"dob":\s*"(\d{4}-\d{2}-\d{2})"} $z1_payload -> dob]} {
+                        if {[scan $dob {%d-%d-%d} year month day] == 3} {
+                            if {$month >= 1 && $month <= 12 && 
+                                $day >= 1 && $day <= 31 && 
+                                $year >= 1900 && $year <= 2099} {
+                                if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
+                                    lappend z1_sensitive_data_types "DOB"
+                                    set z1_sensitive_in_payload true
+
+                                }
+                            }
+                        }
+                        set start_index [expr {[string first $dob $z1_payload $start_index] + [string length $dob]}]
+                    }
+
+                    # Email Check
+                    if {[regexp -start $start_index {"email":\s*"([^"]+@[^"]+)"} $z1_payload -> email]} {
+                        if {[string match "*@*.?*" $email]} {
+                            if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
+                                lappend z1_sensitive_data_types "Email"
+                                set z1_sensitive_in_payload true
+                            }
+                        }
+                        set start_index [expr {[string first $email $z1_payload $start_index] + [string length $email]}]
+                    }
+
+                    # Move to next object if no matches found
+                    if {![info exists old_start_index] || $old_start_index == $start_index} {
+                        incr start_index
+                    }
+                    set old_start_index $start_index
+                }
+            }
+            
+            "XML" - "SOAP" {
+                # SSN check for XML/SOAP
+                if {[scan $z1_payload {%*[^>]>%3d-%2d-%4d} d1 d2 d3] == 3} {
+                    if {$d1 >= 1 && $d1 <= 899 && 
+                        $d1 != 666 && 
+                        $d2 >= 1 && $d2 <= 99 && 
+                        $d3 >= 1 && $d3 <= 9999} {
+                        if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
+                            lappend z1_sensitive_data_types "SSN"
+                            set z1_sensitive_in_payload true
+
+                        }
+                    }
+                }
+
+                # DOB check for XML/SOAP
+                if {[scan $z1_payload {%*[^>]>%4d-%2d-%2d} year month day] == 3} {
+                    if {$month >= 1 && $month <= 12 && 
+                        $day >= 1 && $day <= 31 && 
+                        $year >= 1900 && $year <= 2099} {
+                        if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
+                            lappend z1_sensitive_data_types "DOB"
+                            set z1_sensitive_in_payload true
+                        }
+                    }
+                }
+
+                # Email check for XML/SOAP
+                if {[scan $z1_payload {%*[^>]>%[^@]@%[^<]} local domain] == 2} {
+                    if {[string length $local] > 0 && 
+                        [string length $domain] > 0 && 
+                        [string first "." $domain] != -1} {
+                        if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
+                            lappend z1_sensitive_data_types "Email"
+                            set z1_sensitive_in_payload true
+                        }
+                    }
+                }
+
+            }
+            
+            "gRPC" - default {
+                # Generic scan checks for gRPC and unknown types
+                # SSN Check
+                if {[scan $z1_payload {%*[^0-9]%3d-%2d-%4d} d1 d2 d3] == 3} {
+                    if {$d1 >= 1 && $d1 <= 899 && 
+                        $d1 != 666 && 
+                        $d2 >= 1 && $d2 <= 99 && 
+                        $d3 >= 1 && $d3 <= 9999} {
+                        if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
+                            lappend z1_sensitive_data_types "SSN"
+                            set z1_sensitive_in_payload true
+                        }
+                    }
+                }
+
+                # DOB check - with international format support
+                if {([scan $z1_payload {%d/%d/%d} month day year] == 3 || 
+                [scan $z1_payload {%d-%d-%d} month day year] == 3 || 
+                [scan $z1_payload {%d.%d.%d} month day year] == 3 ||
+                [scan $z1_payload {%4d-%2d-%2d} year month day] == 3)} {  # Added international format
+    
+                # For US format dates, year might be 2 digits or 4 digits
+                if {[string length $year] == 2} {
+                # Convert 2-digit year to 4-digit
+                set year [expr {$year < 50 ? $year + 2000 : $year + 1900}]
+                }
+    
+                if {($month >= 1 && $month <= 12) && 
+                ($day >= 1 && $day <= 31) && 
+                ($year >= 1900 && $year <= 2099)} {
+                if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
+                lappend z1_sensitive_data_types "DOB"
+
+                        }
+                    }
+                }      
+
+                # Email Check
+                if {[scan $z1_payload {%*[^@]%[^@]@%s} local domain] == 2} {
+                    if {[string length $local] > 0 && 
+                        [string length $domain] > 0 && 
+                        [string first "." $domain] != -1} {
+                        if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
+                            lappend z1_sensitive_data_types "Email"
+                            set z1_sensitive_in_payload true
+                        }
+                    }
+                }
+
+            }
+        }
+        
     }
 }
-
 when LB_SELECTED {
-    if {[info exists process_request] && $process_request} {
-        #Collect Pool and node data
-        set z1_pool [LB::server]
-    }
+    #Collect Pool and node data
+    set z1_pool [LB::server]
 }
 
 when HTTP_RESPONSE {
-    if {[info exists process_request] && $process_request} {
-        #Collect HTTP response data
-        set z1_http_status [string range [HTTP::status] 0 $z1_globalStringLimit]
-        if { [HTTP::header Content-Length] > 0 } then {
-           set z1_res_length [string range [HTTP::header "Content-Length"] 0 $z1_globalStringLimit]
-        } else {
-           set z1_res_length 0
-        }
+    if {$static::request_counter != 0} {
+        return
+    }
+    
+    set z1_http_status [HTTP::status]
+    if { [HTTP::header Content-Length] > 0 } then {
+       set z1_res_length [HTTP::header "Content-Length"]
+    } else {
+       set z1_res_length 0
+    }
 
-        # Collect response Content-Type
-        set z1_res_content_type [string range [HTTP::header "Content-Type"] 0 $z1_globalStringLimit]
+    # Collect response Content-Type
+    set z1_res_content_type [HTTP::header "Content-Type"]
 
-        # Collect response headers as JSON
-        set z1_res_headers "{"
-        set first_header 1
-        foreach header_name [HTTP::header names] {
-            if {$header_name ne "Content-Type"} {
-                set header_value [HTTP::header $header_name]
-                if {!$first_header} {
-                    append z1_res_headers ","
-                }
-                append z1_res_headers "\"$header_name\":\"[URI::encode $header_value]\""
-                set first_header 0
+    # Collect response headers as JSON
+    set z1_res_headers "{"
+    set first_header 1
+    foreach header_name [HTTP::header names] {
+        if {$header_name ne "Content-Type"} {
+            set header_value [HTTP::header $header_name]
+            if {!$first_header} {
+                append z1_res_headers ","
             }
+            append z1_res_headers "\"$header_name\":\"[URI::encode $header_value]\""
+            set first_header 0
         }
-        append z1_res_headers " } "
+    }
+    append z1_res_headers " } "
 
-        # Generate RFC 5424 compliant syslog message
+       # Generate RFC 5424 compliant syslog message
         set pri "<118>" ; # Facility 16 (local0), Severity 6 (Informational)
         set version "1" ; # Version of the syslog protocol specification
 
@@ -123,15 +458,27 @@ when HTTP_RESPONSE {
 
         set base_msg "$pri$version $timestamp $hostname $appname $procid $msgid $sd"
 
+        # Safely join z1_sensitive_data_types
+        if {[info exists z1_sensitive_data_types] && [llength $z1_sensitive_data_types] > 0} {
+            set joined_types [join $z1_sensitive_data_types ","]
+        } else {
+            set joined_types ""
+        }
+
+        # Safely get z1_payload_type
+        if {[info exists z1_payload_type]} {
+            set payload_type $z1_payload_type
+        } else {
+            set payload_type "Unknown"
+        }
+
         #json format
-        set msg " {\"uri\":\"$z1_http_uri\",\"host\":\"$z1_http_host\",\"method\":\"$z1_http_method\",\"statusCode\":\"$z1_http_status\",\"reqCType\":\"$z1_req_content_type\",\"resCType\":\"$z1_res_content_type\",\"httpv\":\"$z1_http_version\",\"hasAuthorization\":$z1_has_auth"
+        set msg " {\"uri\":\"$z1_http_uri\",\"host\":\"$z1_http_host\",\"method\":\"$z1_http_method\",\"statusCode\":\"$z1_http_status\",\"reqCType\":\"$z1_req_content_type\",\"resCType\":\"$z1_res_content_type\",\"httpv\":\"$z1_http_version\",\"hasAuthorization\":$z1_has_auth,\"sensitiveInHeaders\":$z1_sensitive_in_headers,\"sensitiveDataTypes\":\"$joined_types\",\"sensitiveInPayload\":$z1_sensitive_in_payload,\"payloadType\":\"$payload_type\""
 
         #line break for Loki
         set final_message "$base_msg$msg}\n"
-
         HSL::send $z1_hsl $final_message
 
         #clear all variables
-        unset -nocomplain z1_http_uri z1_http_host z1_http_method z1_req_length z1_http_status z1_res_length z1_virtual_server z1_http_referrer z1_req_content_type z1_res_content_type z1_http_user_agent z1_http_version z1_vip z1_clientsslprofile z1_client_ip z1_client_port z1_payload z1_req_headers z1_res_headers z1_has_auth
-    }
-}
+        unset -nocomplain z1_http_uri z1_http_host z1_http_method z1_req_length z1_http_status z1_res_length z1_virtual_server z1_http_referrer z1_req_content_type z1_res_content_type z1_http_user_agent z1_http_version z1_vip z1_clientsslprofile z1_client_ip z1_client_port z1_payload z1_req_headers z1_res_headers z1_has_auth z1_sensitive_in_headers z1_sensitive_data_types z1_payload_type z1_sensitive_in_payload
+        }

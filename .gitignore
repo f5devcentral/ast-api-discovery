@@ -4,6 +4,7 @@
 .idea
 *.log
 tmp/
+*.pem
 
 node_modules/
 *.py[cod]

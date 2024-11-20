@@ -1,484 +1,447 @@
-# Made with care by a team of F5ers who love this technology (MPW, MS)
-# This iRule scans information sent via headers, URI etc..
-# It also checks for SSN, DOB, email, IP address, API keys, and UUIDs
-# It now detects payload types: REST, SOAP, GraphQL, XML, and gRPC
-# Before production release, please add catch statements
-# A prefix of z1_ has been added to each variable to make them globally unique
-# Version 3.7 - Added processing counter to run every third request
-
 when RULE_INIT {
+    # Debug flag - set to 0 to disable local logging
+    set static::debug 1
+    
     # Initialize counter for processing every third request
     set static::request_counter 0
    
+    # Pre-compile regular expressions for better performance
+    set static::email_regex {[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}}
+    set static::ssn_regex {(\d{3}-\d{2}-\d{4})}
+    set static::cc_regex {\d{13,19}}
+    set static::json_ssn_regex {"ssn":\s*"(\d{3}-\d{2}-\d{4})"}
+    set static::json_dob_regex {"dob":\s*"(\d{4}-\d{2}-\d{2})"}
+    set static::json_email_regex {"email":\s*"([^"]+@[^"]+)"}
+    set static::dob_regex {(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{2}-\d{2}-\d{4}|\d{2}\.\d{2}\.\d{4})}
+    
+    # Cache commonly used values
+    set static::valid_years_start 1900
+    set static::valid_years_end 2099
+    
+    if {$static::debug} {
+        log local0. "API Discovery iRule initialized with debug logging enabled"
+    }
+    
+    # Luhn check optimization - moved to static context
     set static::luhn_check {
         set sum 0
         set alternate 0
         set card_number [string map {" " ""} $card_number]
         
         for {set i [string length $card_number]} {$i > 0} {incr i -1} {
-            set digit [string index $card_number [expr {$i - 1}]]
-            set digit [scan $digit %d]
-            
+            scan [string index $card_number [expr {$i - 1}]] %d digit
             if {$alternate} {
-                set digit [expr {$digit * 2}]
-                if {$digit > 9} {
-                    set digit [expr {$digit - 9}]
-                }
+                set digit [expr {($digit * 2 > 9) ? ($digit * 2 - 9) : ($digit * 2)}]
             }
-            
-            set sum [expr {$sum + $digit}]
+            incr sum $digit
             set alternate [expr {!$alternate}]
         }
-        
         expr {$sum % 10 == 0}
     }
 }
 
 when CLIENT_ACCEPTED {
-
-    ###User-Edit Variables start###
-    set z1_logging logging-pool-tls ; #Name of LTM pool to use for remote logging servers 
-    set z1_remoteLogProtocol TCP ; #TCP for reliable transmission
-    ###User-Edit Variables end###
-
-    # Increment and check counter
-    incr static::request_counter
-    if {$static::request_counter >= 3} {
-        set static::request_counter 0
-    #Open socket to remote log destination 
-    set z1_hsl [HSL::open -proto $z1_remoteLogProtocol -pool $z1_logging]
-
+    # Increment and check counter using modulo for efficiency
+    set static::request_counter [expr {($static::request_counter + 1) % 3}]
+    
+    if {$static::request_counter == 0} {
+        if {$static::debug} {
+            log local0. "Processing request (counter=0)"
+        }
+        
+        ###User-Edit Variables start###
+        set z1_logging logging-pool-tls
+        set z1_remoteLogProtocol TCP
+        ###User-Edit Variables end###
+        
+        #Open socket to remote log destination 
+        if {[catch {
+            set z1_hsl [HSL::open -proto $z1_remoteLogProtocol -pool $z1_logging]
+            if {$static::debug} {
+                log local0. "HSL connection opened successfully"
+            }
+        } err]} {
+            if {$static::debug} {
+                log local0. "Error opening HSL connection: $err"
+            }
+        }
     }
 }
 
 when HTTP_REQUEST {
-    if {$static::request_counter != 0} {
-    return
+    if {$static::request_counter != 0} { return }
+    
+    if {$static::debug} {
+        log local0. "Processing HTTP request for URI: [HTTP::uri]"
     }
     
-
-    set z1_sensitive_in_payload false
-
-    #Collect HTTP request data
-    set z1_virtual_server [virtual name]
-    set z1_clientsslprofile [PROFILE::clientssl name]
-    set z1_http_host [HTTP::host]
-    set z1_http_uri [HTTP::uri]
-    set z1_http_method [HTTP::method]
-    set z1_http_referrer [HTTP::header "Referer"]
-    set z1_req_content_type [HTTP::header "Content-Type"]
-    set z1_http_user_agent [HTTP::header "User-Agent"]
-    set z1_http_version [HTTP::version]
-    set z1_vip [IP::local_addr]
-    set z1_client_ip [IP::client_addr]
-    set z1_client_port [TCP::client_port]
-
-    # Initialize z1_sensitive_data_types and z1_payload_type
-    set z1_sensitive_data_types [list]
-    set z1_payload_type "Unknown"
+    # Initialize variables once
+    array set z1_request_data {
+        sensitive_in_payload false
+        sensitive_in_headers false
+        sensitive_data_types {}
+        payload_type "Unknown"
+        has_auth false
+    }
     
+    # Store HTTP request data immediately
+    set z1_request_data(http_uri) [HTTP::uri]
+    set z1_request_data(http_host) [HTTP::host]
+    set z1_request_data(http_method) [HTTP::method]
+    set z1_request_data(http_version) [HTTP::version]
+    set z1_request_data(req_content_type) [HTTP::header "Content-Type"]
+    set z1_request_data(virtual_server) [virtual name]
+    set z1_request_data(clientsslprofile) [PROFILE::clientssl name]
+    set z1_request_data(http_referrer) [HTTP::header "Referer"]
+    set z1_request_data(http_user_agent) [HTTP::header "User-Agent"]
+    set z1_request_data(vip) [IP::local_addr]
+    set z1_request_data(client_ip) [IP::client_addr]
+    set z1_request_data(client_port) [TCP::client_port]
 
-    # Scan for Authorization header
+    # Check Authorization header once
     if {[HTTP::header "Authorization"] ne ""} {
-        set z1_has_auth true
-    } else {
-        set z1_has_auth false
-    }
-
-    # Scan full payload - if Content-Length is present and valid
-    if { [HTTP::header "Content-Length"] ne "" } {
-        set z1_req_length [HTTP::header "Content-Length"]
-        if { [string is integer -strict $z1_req_length] && $z1_req_length > 0 } {
-            HTTP::collect $z1_req_length
+        set z1_request_data(has_auth) true
+        if {$static::debug} {
+            log local0. "Authorization header found"
         }
-    } else {
-        set z1_req_length 0
     }
 
-        # Scan all headers
-
-        foreach header_name [HTTP::header names] {
+    # Efficient header scanning using single pass
+    foreach header_name [HTTP::header names] {
         set header_value [HTTP::header $header_name]
-
-        # Per SSA rules, first three digits must be between 001-899
-        # Cannot be 000, 666, or 900-999
-        # SSN check with stricter validation
-        if {[scan $header_value {%3d-%2d-%4d} d1 d2 d3] == 3} {
-        # Check if the first part looks like a month (1-12)
-        if {$d1 >= 1 && $d1 <= 12} {
-        # Skip SSN check if it looks like a date
-        # Don't return - continue checking other patterns
-        } else {
-        # SSN validation rules
-        if {$d1 >= 1 && $d1 <= 899 && 
-            $d1 != 666 && 
-            $d2 >= 1 && $d2 <= 99 && 
-            $d3 >= 1 && $d3 <= 9999} {
-            if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
-                lappend z1_sensitive_data_types "SSN"
-                    }
+        
+        # SSN Check with date format exclusion
+        if {[regexp $static::ssn_regex $header_value -> ssn]} {
+            scan $ssn {%d-%d-%d} d1 d2 d3
+            # Check if it looks like a date first
+            if {$d1 >= 1 && $d1 <= 12} {
+                # Skip SSN check if it looks like a date
+                if {$static::debug} {
+                    log local0. "Skipping SSN check for date-like pattern in header"
                 }
-            }
-        }
-        if {[scan $header_value "%d" cc_number] == 1} {
-            set cc_length [string length $cc_number]
-            if {$cc_length >= 13 && $cc_length <= 19} {
-                set card_number $cc_number
-                if {[eval $static::luhn_check]} {
-                    if {[lsearch $z1_sensitive_data_types "CreditCard"] == -1} {
-                        lappend z1_sensitive_data_types "CreditCard"
-                    }
-                }
-            }
-        }
-        if {[regexp {[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}} $header_value]} {
-            if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
-                lappend z1_sensitive_data_types "Email"
-            }
-        }
-        # DOB check - with international format support
-        if {([scan $header_value {%d/%d/%d} month day year] == 3 || 
-        [scan $header_value {%d-%d-%d} month day year] == 3 || 
-        [scan $header_value {%d.%d.%d} month day year] == 3 ||
-        [scan $header_value {%4d-%2d-%2d} year month day] == 3)} {  # Added international format
-    
-        # For US format dates, year might be 2 digits or 4 digits
-        if {[string length $year] == 2} {
-        # Convert 2-digit year to 4-digit
-        set year [expr {$year < 50 ? $year + 2000 : $year + 1900}]
-        }
-    
-        if {($month >= 1 && $month <= 12) && 
-        ($day >= 1 && $day <= 31) && 
-        ($year >= 1900 && $year <= 2099)} {
-        if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
-            lappend z1_sensitive_data_types "DOB"
-                }
-            }
-        }      
-
-    }
-    # Log summary of findings in headers
-    set z1_sensitive_in_headers [expr {[llength $z1_sensitive_data_types] > 0 ? "true" : "false"}]
-    }
-
-    when HTTP_REQUEST_DATA {
-
-   # Add counter check at the beginning
-    if {$static::request_counter != 0} {
-        return
-    }
-    # Initialize sensitive data types array if not exists
-    if {![info exists z1_sensitive_data_types]} {
-        set z1_sensitive_data_types [list]
-    }
-
-    if {[HTTP::payload length] > 0} {
-        set z1_payload [HTTP::payload]
-        # First check for raw data patterns before payload type determination
-        # Raw SSN Check
-        if {[regexp {(\d{3}-\d{2}-\d{4})} $z1_payload -> ssn]} {
-            if {[scan $ssn {%d-%d-%d} d1 d2 d3] == 3} {
-                if {$d1 >= 1 && $d1 <= 899 && 
-                    $d1 != 666 && 
+            } else {
+                # Validate SSN
+                if {$d1 >= 1 && $d1 <= 899 && $d1 != 666 && 
                     $d2 >= 1 && $d2 <= 99 && 
                     $d3 >= 1 && $d3 <= 9999} {
-                    if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
-                        lappend z1_sensitive_data_types "SSN"
-                        set z1_sensitive_in_payload true
+                    lappend z1_request_data(sensitive_data_types) "SSN"
+                    set z1_request_data(sensitive_in_headers) true
+                    if {$static::debug} {
+                        log local0. "SSN found in header: $header_name"
                     }
                 }
             }
         }
-
-        # Raw Credit Card Check
-        if {[regexp {\d{13,19}} $z1_payload cc_number]} {
+        
+        # Credit card check with optimized Luhn
+        if {[regexp $static::cc_regex $header_value cc_number]} {
             set card_number $cc_number
             if {[eval $static::luhn_check]} {
-                if {[lsearch $z1_sensitive_data_types "CreditCard"] == -1} {
-                    lappend z1_sensitive_data_types "CreditCard"
-                    set z1_sensitive_in_payload true
+                lappend z1_request_data(sensitive_data_types) "CreditCard"
+                set z1_request_data(sensitive_in_headers) true
+                if {$static::debug} {
+                    log local0. "Credit Card found in header: $header_name"
                 }
             }
         }
         
-        # Raw Email Check
-        if {[regexp {([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})} $z1_payload -> email]} {
-            if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
-                lappend z1_sensitive_data_types "Email"
-                set z1_sensitive_in_payload true
+        # Email check
+        if {[regexp $static::email_regex $header_value]} {
+            lappend z1_request_data(sensitive_data_types) "Email"
+            set z1_request_data(sensitive_in_headers) true
+            if {$static::debug} {
+                log local0. "Email found in header: $header_name"
             }
         }
-
-        # DOB check - with international format support
-        if {([scan $z1_payload {%d/%d/%d} month day year] == 3 || 
-        [scan $z1_payload {%d-%d-%d} month day year] == 3 || 
-        [scan $z1_payload {%d.%d.%d} month day year] == 3 ||
-        [scan $z1_payload {%4d-%2d-%2d} year month day] == 3)} {  # Added international format
-    
-        # For US format dates, year might be 2 digits or 4 digits
-        if {[string length $year] == 2} {
-        # Convert 2-digit year to 4-digit
-        set year [expr {$year < 50 ? $year + 2000 : $year + 1900}]
-        }
-    
-        if {($month >= 1 && $month <= 12) && 
-        ($day >= 1 && $day <= 31) && 
-        ($year >= 1900 && $year <= 2099)} {
-        if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
-            lappend z1_sensitive_data_types "DOB"
-            set z1_sensitive_in_payload true
+        
+        # DOB check with multiple format support
+        if {[regexp $static::dob_regex $header_value dob]} {
+            if {[catch {
+                switch -regexp $dob {
+                    {\d{4}-\d{2}-\d{2}} {
+                        scan $dob {%d-%d-%d} year month day
+                    }
+                    {\d{2}/\d{2}/\d{4}} {
+                        scan $dob {%d/%d/%d} month day year
+                    }
+                    {\d{2}-\d{2}-\d{4}} {
+                        scan $dob {%d-%d-%d} month day year
+                    }
+                    {\d{2}\.\d{2}\.\d{4}} {
+                        scan $dob {%d.%d.%d} month day year
+                    }
+                }
+                
+                if {$month >= 1 && $month <= 12 && 
+                    $day >= 1 && $day <= 31 && 
+                    $year >= $static::valid_years_start && 
+                    $year <= $static::valid_years_end} {
+                    lappend z1_request_data(sensitive_data_types) "DOB"
+                    set z1_request_data(sensitive_in_headers) true
+                    if {$static::debug} {
+                        log local0. "DOB found in header: $header_name"
+                    }
+                }
+            } err]} {
+                if {$static::debug} {
+                    log local0. "Error processing DOB in header: $err"
                 }
             }
-        }      
+        }
+    }
+
+    # Collect payload if present
+    if {[HTTP::header "Content-Length"] ne ""} {
+        set z1_req_length [HTTP::header "Content-Length"]
+        if {[string is integer -strict $z1_req_length] && $z1_req_length > 0} {
+            HTTP::collect $z1_req_length
+            if {$static::debug} {
+                log local0. "Collecting payload of length: $z1_req_length"
+            }
+        }
+    }
+}
+
+when HTTP_REQUEST_DATA {
+    if {$static::request_counter != 0} { return }
+    
+    if {[HTTP::payload length] > 0} {
+        set z1_payload [HTTP::payload]
         
-        # Determine payload type
-        set z1_payload_type "Unknown"
-        
-        # Check for gRPC
-        if {[HTTP::version] eq "2.0" && [HTTP::header "Content-Type"] eq "application/grpc"} {
-            set z1_payload_type "gRPC"
-
-        # Check for REST/JSON
-        } elseif {[string first "\[" [string trimleft $z1_payload]] == 0} {
-            set z1_payload_type "REST_ARRAY"
-
-        } elseif {[string first "\{" [string trimleft $z1_payload]] == 0} {
-            set z1_payload_type "REST"
-
-        # Check for SOAP
-        } elseif {[string first "<soap" $z1_payload] != -1} {
-            set z1_payload_type "SOAP"
-
-        # Check for XML
-        } elseif {[string first "<?xml" $z1_payload] == 0} {
-            set z1_payload_type "XML"
-
+        if {$static::debug} {
+            log local0. "Processing payload of length: [HTTP::payload length]"
         }
         
-        switch $z1_payload_type {
+        # Determine payload type efficiently
+        if {$z1_request_data(http_version) eq "2.0" && $z1_request_data(req_content_type) eq "application/grpc"} {
+            set z1_request_data(payload_type) "gRPC"
+        } else {
+            set trimmed_payload [string trimleft $z1_payload]
+            set first_char [string index $trimmed_payload 0]
+            
+            switch -exact -- $first_char {
+                "\[" { set z1_request_data(payload_type) "REST_ARRAY" }
+                "\{" { set z1_request_data(payload_type) "REST" }
+                "<" {
+                    if {[string first "<soap" $z1_payload] != -1} {
+                        set z1_request_data(payload_type) "SOAP"
+                    } elseif {[string first "<?xml" $z1_payload] == 0} {
+                        set z1_request_data(payload_type) "XML"
+                    }
+                }
+            }
+        }
+        
+        if {$static::debug} {
+            log local0. "Detected payload type: $z1_request_data(payload_type)"
+        }
+        
+        # Raw data pattern scanning (common for all types)
+        if {[regexp $static::ssn_regex $z1_payload -> ssn]} {
+            scan $ssn {%d-%d-%d} d1 d2 d3
+            if {$d1 >= 1 && $d1 <= 899 && $d1 != 666 && 
+                $d2 >= 1 && $d2 <= 99 && 
+                $d3 >= 1 && $d3 <= 9999} {
+                lappend z1_request_data(sensitive_data_types) "SSN"
+                set z1_request_data(sensitive_in_payload) true
+                if {$static::debug} {
+                    log local0. "SSN found in payload"
+                }
+            }
+        }
+        
+        if {[regexp $static::cc_regex $z1_payload cc_number]} {
+            set card_number $cc_number
+            if {[eval $static::luhn_check]} {
+                lappend z1_request_data(sensitive_data_types) "CreditCard"
+                set z1_request_data(sensitive_in_payload) true
+                if {$static::debug} {
+                    log local0. "Credit Card found in payload"
+                }
+            }
+        }
+        
+        if {[regexp $static::email_regex $z1_payload]} {
+            lappend z1_request_data(sensitive_data_types) "Email"
+            set z1_request_data(sensitive_in_payload) true
+            if {$static::debug} {
+                log local0. "Email found in payload"
+            }
+        }
+        
+        if {[regexp $static::dob_regex $z1_payload dob]} {
+            if {[catch {
+                switch -regexp $dob {
+                    {\d{4}-\d{2}-\d{2}} {
+                        scan $dob {%d-%d-%d} year month day
+                    }
+                    {\d{2}/\d{2}/\d{4}} {
+                        scan $dob {%d/%d/%d} month day year
+                    }
+                    {\d{2}-\d{2}-\d{4}} {
+                        scan $dob {%d-%d-%d} month day year
+                    }
+                    {\d{2}\.\d{2}\.\d{4}} {
+                        scan $dob {%d.%d.%d} month day year
+                    }
+                }
+                
+                if {$month >= 1 && $month <= 12 && 
+                    $day >= 1 && $day <= 31 && 
+                    $year >= $static::valid_years_start && 
+                    $year <= $static::valid_years_end} {
+                    lappend z1_request_data(sensitive_data_types) "DOB"
+                    set z1_request_data(sensitive_in_payload) true
+                    if {$static::debug} {
+                        log local0. "DOB found in payload"
+                    }
+                }
+            } err]} {
+                if {$static::debug} {
+                    log local0. "Error processing DOB in payload: $err"
+                }
+            }
+        }
+        
+        # Type-specific processing
+        switch -- $z1_request_data(payload_type) {
             "REST" - "REST_ARRAY" {
-                # JSON Processing with regex
-                set start_index 0
-                while {$start_index < [string length $z1_payload]} {
-                    # SSN Check
-                    if {[regexp -start $start_index {"ssn":\s*"(\d{3}-\d{2}-\d{4})"} $z1_payload -> ssn]} {
-                        if {[scan $ssn {%d-%d-%d} d1 d2 d3] == 3} {
-                            if {$d1 >= 1 && $d1 <= 899 && 
-                                $d1 != 666 && 
-                                $d2 >= 1 && $d2 <= 99 && 
-                                $d3 >= 1 && $d3 <= 9999} {
-                                if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
-                                    lappend z1_sensitive_data_types "SSN"
-
-                                }
+                if {$static::debug} {
+                    log local0. "Processing REST/REST_ARRAY payload"
+                }
+                # JSON-specific pattern matching
+                foreach {pattern type} [list \
+                    $static::json_ssn_regex "SSN" \
+                    $static::json_dob_regex "DOB" \
+                    $static::json_email_regex "Email"] {
+                    if {[regexp $pattern $z1_payload]} {
+                        if {[lsearch $z1_request_data(sensitive_data_types) $type] == -1} {
+                            lappend z1_request_data(sensitive_data_types) $type
+                            set z1_request_data(sensitive_in_payload) true
+                            if {$static::debug} {
+                                log local0. "Found $type in JSON payload"
                             }
                         }
-                        set start_index [expr {[string first $ssn $z1_payload $start_index] + [string length $ssn]}]
                     }
-
-                    # DOB Check
-                    if {[regexp -start $start_index {"dob":\s*"(\d{4}-\d{2}-\d{2})"} $z1_payload -> dob]} {
-                        if {[scan $dob {%d-%d-%d} year month day] == 3} {
-                            if {$month >= 1 && $month <= 12 && 
-                                $day >= 1 && $day <= 31 && 
-                                $year >= 1900 && $year <= 2099} {
-                                if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
-                                    lappend z1_sensitive_data_types "DOB"
-                                    set z1_sensitive_in_payload true
-
-                                }
-                            }
-                        }
-                        set start_index [expr {[string first $dob $z1_payload $start_index] + [string length $dob]}]
-                    }
-
-                    # Email Check
-                    if {[regexp -start $start_index {"email":\s*"([^"]+@[^"]+)"} $z1_payload -> email]} {
-                        if {[string match "*@*.?*" $email]} {
-                            if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
-                                lappend z1_sensitive_data_types "Email"
-                                set z1_sensitive_in_payload true
-                            }
-                        }
-                        set start_index [expr {[string first $email $z1_payload $start_index] + [string length $email]}]
-                    }
-
-                    # Move to next object if no matches found
-                    if {![info exists old_start_index] || $old_start_index == $start_index} {
-                        incr start_index
-                    }
-                    set old_start_index $start_index
                 }
             }
             
             "XML" - "SOAP" {
-                # SSN check for XML/SOAP
-                if {[scan $z1_payload {%*[^>]>%3d-%2d-%4d} d1 d2 d3] == 3} {
-                    if {$d1 >= 1 && $d1 <= 899 && 
-                        $d1 != 666 && 
-                        $d2 >= 1 && $d2 <= 99 && 
-                        $d3 >= 1 && $d3 <= 9999} {
-                        if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
-                            lappend z1_sensitive_data_types "SSN"
-                            set z1_sensitive_in_payload true
-
+                if {$static::debug} {
+                    log local0. "Processing XML/SOAP payload"
+                }
+                # XML-specific pattern matching
+                if {[regexp {<[^>]+>([^<]+)} $z1_payload -> content]} {
+                    foreach {pattern type} [list \
+                        $static::ssn_regex "SSN" \
+$static::email_regex "Email" \
+                        $static::dob_regex "DOB"] {
+                        if {[regexp $pattern $content]} {
+                            if {[lsearch $z1_request_data(sensitive_data_types) $type] == -1} {
+                                lappend z1_request_data(sensitive_data_types) $type
+                                set z1_request_data(sensitive_in_payload) true
+                                if {$static::debug} {
+                                    log local0. "Found $type in XML/SOAP payload"
+                                }
+                            }
                         }
                     }
                 }
-
-                # DOB check for XML/SOAP
-                if {[scan $z1_payload {%*[^>]>%4d-%2d-%2d} year month day] == 3} {
-                    if {$month >= 1 && $month <= 12 && 
-                        $day >= 1 && $day <= 31 && 
-                        $year >= 1900 && $year <= 2099} {
-                        if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
-                            lappend z1_sensitive_data_types "DOB"
-                            set z1_sensitive_in_payload true
-                        }
-                    }
-                }
-
-                # Email check for XML/SOAP
-                if {[scan $z1_payload {%*[^>]>%[^@]@%[^<]} local domain] == 2} {
-                    if {[string length $local] > 0 && 
-                        [string length $domain] > 0 && 
-                        [string first "." $domain] != -1} {
-                        if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
-                            lappend z1_sensitive_data_types "Email"
-                            set z1_sensitive_in_payload true
-                        }
-                    }
-                }
-
-            }
-            
-            "gRPC" - default {
-                # Generic scan checks for gRPC and unknown types
-                # SSN Check
-                if {[scan $z1_payload {%*[^0-9]%3d-%2d-%4d} d1 d2 d3] == 3} {
-                    if {$d1 >= 1 && $d1 <= 899 && 
-                        $d1 != 666 && 
-                        $d2 >= 1 && $d2 <= 99 && 
-                        $d3 >= 1 && $d3 <= 9999} {
-                        if {[lsearch $z1_sensitive_data_types "SSN"] == -1} {
-                            lappend z1_sensitive_data_types "SSN"
-                            set z1_sensitive_in_payload true
-                        }
-                    }
-                }
-
-                # DOB check - with international format support
-                if {([scan $z1_payload {%d/%d/%d} month day year] == 3 || 
-                [scan $z1_payload {%d-%d-%d} month day year] == 3 || 
-                [scan $z1_payload {%d.%d.%d} month day year] == 3 ||
-                [scan $z1_payload {%4d-%2d-%2d} year month day] == 3)} {  # Added international format
-    
-                # For US format dates, year might be 2 digits or 4 digits
-                if {[string length $year] == 2} {
-                # Convert 2-digit year to 4-digit
-                set year [expr {$year < 50 ? $year + 2000 : $year + 1900}]
-                }
-    
-                if {($month >= 1 && $month <= 12) && 
-                ($day >= 1 && $day <= 31) && 
-                ($year >= 1900 && $year <= 2099)} {
-                if {[lsearch $z1_sensitive_data_types "DOB"] == -1} {
-                lappend z1_sensitive_data_types "DOB"
-
-                        }
-                    }
-                }      
-
-                # Email Check
-                if {[scan $z1_payload {%*[^@]%[^@]@%s} local domain] == 2} {
-                    if {[string length $local] > 0 && 
-                        [string length $domain] > 0 && 
-                        [string first "." $domain] != -1} {
-                        if {[lsearch $z1_sensitive_data_types "Email"] == -1} {
-                            lappend z1_sensitive_data_types "Email"
-                            set z1_sensitive_in_payload true
-                        }
-                    }
-                }
-
             }
         }
-        
     }
 }
+
 when LB_SELECTED {
-    #Collect Pool and node data
-    set z1_pool [LB::server]
+    if {$static::request_counter == 0} {
+        set z1_request_data(pool) [LB::server]
+        if {$static::debug} {
+            log local0. "Selected pool member: $z1_request_data(pool)"
+        }
+    }
 }
 
 when HTTP_RESPONSE {
-    if {$static::request_counter != 0} {
-        return
+    if {$static::request_counter != 0} { return }
+    
+    # Store all HTTP response data immediately to avoid timing issues
+    set http_status [HTTP::status]
+    set res_content_type [HTTP::header "Content-Type"]
+    set res_content_length [expr {[HTTP::header "Content-Length"] ne "" ? [HTTP::header "Content-Length"] : 0}]
+    
+    if {$static::debug} {
+        log local0. "Processing HTTP response with status: $http_status"
     }
     
-    set z1_http_status [HTTP::status]
-    if { [HTTP::header Content-Length] > 0 } then {
-       set z1_res_length [HTTP::header "Content-Length"]
-    } else {
-       set z1_res_length 0
-    }
-
-    # Collect response Content-Type
-    set z1_res_content_type [HTTP::header "Content-Type"]
-
-    # Collect response headers as JSON
-    set z1_res_headers "{"
-    set first_header 1
+    # Build response headers JSON efficiently
+    set header_parts [list]
     foreach header_name [HTTP::header names] {
         if {$header_name ne "Content-Type"} {
             set header_value [HTTP::header $header_name]
-            if {!$first_header} {
-                append z1_res_headers ","
-            }
-            append z1_res_headers "\"$header_name\":\"[URI::encode $header_value]\""
-            set first_header 0
+            lappend header_parts "\"$header_name\":\"[URI::encode $header_value]\""
         }
     }
-    append z1_res_headers " } "
-
-       # Generate RFC 5424 compliant syslog message
-        set pri "<118>" ; # Facility 16 (local0), Severity 6 (Informational)
-        set version "1" ; # Version of the syslog protocol specification
-
-        # RFC 5424 compliant timestamp
-        set now [clock seconds]
-        set timestamp [clock format $now -format "%Y-%m-%dT%T.000Z" -gmt true]
-
-        set hostname [info hostname]
-        set appname "F5-API-Discovery"
-        set procid "-"
-        set msgid "-"
-        set sd "-" ; # Structured data, using '-' as we don't have any
-
-        set base_msg "$pri$version $timestamp $hostname $appname $procid $msgid $sd"
-
-        # Safely join z1_sensitive_data_types
-        if {[info exists z1_sensitive_data_types] && [llength $z1_sensitive_data_types] > 0} {
-            set joined_types [join $z1_sensitive_data_types ","]
+    set response_headers "\{[join $header_parts ,]\}"
+    
+    # Generate RFC 5424 compliant syslog message efficiently
+    set timestamp [clock format [clock seconds] -format "%Y-%m-%dT%T.000Z" -gmt true]
+    
+    # Properly format the sensitive data types
+    set types [join $z1_request_data(sensitive_data_types) ","]
+    
+    if {$static::debug} {
+        log local0. "Preparing final message with [llength $z1_request_data(sensitive_data_types)] sensitive data types"
+    }
+    
+    # Build message parts list with previously stored data
+    set msg_parts [list]
+    lappend msg_parts "\"uri\":\"$z1_request_data(http_uri)\""
+    lappend msg_parts "\"host\":\"$z1_request_data(http_host)\""
+    lappend msg_parts "\"method\":\"$z1_request_data(http_method)\""
+    lappend msg_parts "\"statusCode\":\"$http_status\""
+    lappend msg_parts "\"reqCType\":\"$z1_request_data(req_content_type)\""
+    lappend msg_parts "\"resCType\":\"$res_content_type\""
+    lappend msg_parts "\"httpv\":\"$z1_request_data(http_version)\""
+    lappend msg_parts "\"hasAuthorization\":$z1_request_data(has_auth)"
+    lappend msg_parts "\"sensitiveInHeaders\":$z1_request_data(sensitive_in_headers)"
+    lappend msg_parts "\"sensitiveDataTypes\":\"$types\""
+    lappend msg_parts "\"sensitiveInPayload\":$z1_request_data(sensitive_in_payload)"
+    lappend msg_parts "\"payloadType\":\"$z1_request_data(payload_type)\""
+    
+    # Construct the final message with proper JSON formatting
+    set msg_json "\{[join $msg_parts ,]\}"
+    set final_message "<118>1 $timestamp [info hostname] F5-API-Discovery - - - $msg_json\n"
+    
+    if {$static::debug} {
+        log local0. "Sending HSL message: $msg_json"
+    }
+    
+    # Send the message if HSL connection exists
+    if {[catch {
+        if {[info exists z1_hsl]} {
+            HSL::send $z1_hsl $final_message
+            if {$static::debug} {
+                log local0. "HSL message sent successfully"
+            }
         } else {
-            set joined_types ""
+            if {$static::debug} {
+                log local0. "Error: HSL connection not available"
+            }
         }
-
-        # Safely get z1_payload_type
-        if {[info exists z1_payload_type]} {
-            set payload_type $z1_payload_type
-        } else {
-            set payload_type "Unknown"
+    } err]} {
+        if {$static::debug} {
+            log local0. "Error sending HSL message: $err"
         }
-
-        #json format
-        set msg " {\"uri\":\"$z1_http_uri\",\"host\":\"$z1_http_host\",\"method\":\"$z1_http_method\",\"statusCode\":\"$z1_http_status\",\"reqCType\":\"$z1_req_content_type\",\"resCType\":\"$z1_res_content_type\",\"httpv\":\"$z1_http_version\",\"hasAuthorization\":$z1_has_auth,\"sensitiveInHeaders\":$z1_sensitive_in_headers,\"sensitiveDataTypes\":\"$joined_types\",\"sensitiveInPayload\":$z1_sensitive_in_payload,\"payloadType\":\"$payload_type\""
-
-        #line break for Loki
-        set final_message "$base_msg$msg}\n"
-        HSL::send $z1_hsl $final_message
-
-        #clear all variables
-        unset -nocomplain z1_http_uri z1_http_host z1_http_method z1_req_length z1_http_status z1_res_length z1_virtual_server z1_http_referrer z1_req_content_type z1_res_content_type z1_http_user_agent z1_http_version z1_vip z1_clientsslprofile z1_client_ip z1_client_port z1_payload z1_req_headers z1_res_headers z1_has_auth z1_sensitive_in_headers z1_sensitive_data_types z1_payload_type z1_sensitive_in_payload
-        }
+    }
+    
+    if {$static::debug} {
+        log local0. "Request processing completed"
+    }
+    
+    # Clean up
+    unset -nocomplain -- msg_parts msg_json final_message timestamp types header_parts
+    unset -nocomplain -- http_status res_content_type res_content_length response_headers
+    array unset z1_request_data
+    array unset z1_response_data
+    unset -nocomplain -- z1_payload
+}

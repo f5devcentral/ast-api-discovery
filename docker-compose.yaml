@@ -97,6 +97,13 @@ services:
       DATA_ANALYSIS_AT_FETCH_LIMIT: "True"
       # If there are no prior analysis runs, look back at most X seconds
       DATA_ANALYSIS_MAX_FETCH_INTERVAL_SECONDS: 7200
+      # This tells the discovery not to replace the first 2 path segments with $DYN$
+      # e.g. /api/users will not be eligible, but the 12345 in /api/users/12345 will
+      PRUNE_MIN_LEVEL_FOR_PRUNING: 3
+      # Tell discovery not to prune segments with fewer children than:
+      PRUNE_NB_CHILDREN_LOW_NB_CHILDREN: 10
+      # Tell discovery to prune segments with more children than:
+      PRUNE_NB_CHILDREN_HIGH_NB_CHILDREN: 50
       CLICKHOUSE_USE_TLS: "False"   #TODO: Default True
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PASSWORD: ${ANALYZER_CLICKHOUSE_PASSWORD}

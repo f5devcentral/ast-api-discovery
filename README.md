@@ -183,6 +183,29 @@ The API Discovery tool uses the following fields for analysis (exported via BigI
 * HTTP Version (e.g. 1.1)
 * Boolean indicating presense of an authorization header (but not the content of the header, e.g. True / False)
 
+## Troubleshooting
+
+### No Data
+The analysis engine runs by default when the container starts, and then every 2 hours or 3 million records. If the API discovery
+dashboard displays no data check the following:
+
+* The containers (Clickhouse Service, Otel Service, Log Analyzer Service) are all 'UP' according to the widgets in the top left of the dashboard.
+  * If not, run `docker ps -a` and look for containers with status 'Exited'. Then run `docker logs <the exited container ID>` and look for error messages.
+* If containers are up, expand the 'System State Detail' section, and check the 'Logs Received' panel in the top right. This is a measurement from the otel
+collector, so a 0 indicates some issue between the BigIP and the collector (e.g. network firewall, ports incorrectly configured, TLS issues).
+
+### Incorect Dynamic Path Discovery
+There are a number of configuration settings that can be added as ENV variables to help the logic container
+make better choices about which path segments to prune and replace with "$DYN$" (it uses a subset of the logic in the official API discovery
+product, e.g. no machine learning models, and tends to need more help).
+
+* PRUNE_MIN_LEVEL_FOR_PRUNING - prevent the logic from pruning segments below this level
+  * e.g. a value of 3 (default) will prevent /api/users from becoming /api/$DYN$, but /api/users/12345 may become /api/users/$DYN$
+  * Use higher or lower values based on api structure, e.g. a prefix of /api/v1 might need to raise the value to 4.
+* PRUNE_NB_CHILDREN_LOW_NB_CHILDREN - prevent the logic from pruning segments with fewer children than this value (default 10).
+* PRUNE_NB_CHILDREN_HIGH_NB_CHILDREN - prune segments with more children that this value (default 50) assuming min level reached.
+
+
 ## Support
 
 For support, please open a GitHub issue.  Note, the code in this repository is community supported and is not supported by F5 Networks.  For a complete list of supported projects please reference [SUPPORT.md](SUPPORT.md).

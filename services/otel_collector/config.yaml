@@ -35,9 +35,9 @@ processors:
 exporters:
   otlphttp/metrics:
     endpoint: http://prometheus:9090/api/v1/otlp
-  logging/debug:
+  debug/debug:
     verbosity: detailed
-  logging:
+  debug:
   otlphttp/loki:
     endpoint: http://loki:3100/otlp
   clickhouse:
@@ -64,8 +64,8 @@ service:
     metrics/otel:
       receivers: [prometheus/collector]
       processors: [batch]
-      exporters: [logging, otlphttp/metrics]
+      exporters: [debug, otlphttp/metrics]
     logs/clickhouse:
       receivers: [syslog,syslog/tcp]
       processors: [batch/clickhouse]
-      exporters: [logging, clickhouse]
+      exporters: [debug, clickhouse]

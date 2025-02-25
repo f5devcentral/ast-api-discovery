@@ -43,6 +43,7 @@ when RULE_INIT {
 
 when CLIENT_ACCEPTED {
     if {[catch {
+        set processRequest 0
         set z1_logging logging-pool-tls
         set z1_remoteLogProtocol TCP
         set hsl [HSL::open -proto $z1_remoteLogProtocol -pool $z1_logging]
@@ -55,7 +56,7 @@ when CLIENT_ACCEPTED {
 when HTTP_REQUEST {
     if {[catch {
         set processRequest 0
-## Check if count table exists. If not, initalize with 1 to avoid null errors. Auto-reset count after 180 seconds to keep the table small. 
+    ## Check if count table exists. If not, initalize with 1 to avoid null errors. Auto-reset count after 180 seconds to keep the table small. 
         if {[table lookup -notouch "request_counter"] < 1} {
             table set "request_counter" 1 180 180
         } else {
@@ -85,7 +86,12 @@ when HTTP_REQUEST {
                 set z1_request_data(http_version) [HTTP::version]
                 set z1_request_data(req_content_type) [HTTP::header "Content-Type"]
                 set z1_request_data(virtual_server) [virtual name]
-                set z1_request_data(clientsslprofile) [PROFILE::clientssl name]
+                ## Check if clientSSL profile is assigned to virtual server 
+                if { [PROFILE::exists clientssl] == 1} {
+                    set z1_request_data(clientsslprofile) [PROFILE::clientssl name]
+                } else { 
+                    set z1_request_data(clientsslprofile) "none"
+                }
                 set z1_request_data(http_referrer) [HTTP::header "Referer"]
                 set z1_request_data(http_user_agent) [HTTP::header "User-Agent"]
                 set z1_request_data(vip) [IP::local_addr]
@@ -100,6 +106,8 @@ when HTTP_REQUEST {
             }
 
             if {[catch {
+                # Initialize card_number outside of foreach for proper scope
+                set card_number ""
                 foreach header_name [HTTP::header names] {
                     set header_value [HTTP::header $header_name]
                     # SSN Check with date format exclusion
@@ -122,7 +130,7 @@ when HTTP_REQUEST {
                     # Credit card check with optimized Luhn
                     if {[regexp $static::cc_regex $header_value cc_number]} {
                         set card_number $cc_number
-                        if {[catch {eval $static::luhn_check} result] && $result} {
+                        if {[eval $static::luhn_check]} {
                             lappend z1_request_data(sensitive_data_types) "CreditCard"
                             set z1_request_data(sensitive_in_headers) true
                         }
@@ -229,7 +237,7 @@ when HTTP_REQUEST_DATA {
             if {[catch {
                 if {[regexp $static::cc_regex $z1_payload cc_number]} {
                     set card_number $cc_number
-                    if {[catch {eval $static::luhn_check} result] && $result} {
+                    if {[eval $static::luhn_check]} {
                         lappend z1_request_data(sensitive_data_types) "CreditCard"
                         set z1_request_data(sensitive_in_payload) true
                     }
@@ -292,7 +300,7 @@ when HTTP_REQUEST_DATA {
                         }
                     }
                     
-                    "XML" - "SOAP" {
+"XML" - "SOAP" {
                         if {[regexp {<[^>]+>([^<]+)} $z1_payload -> content]} {
                             foreach {pattern type} [list \
                                 $static::ssn_regex "SSN" \
@@ -316,9 +324,10 @@ when HTTP_REQUEST_DATA {
         log local0.error "Error in HTTP_REQUEST_DATA: $err"
     }
 }
+
 ## Exit gracefully if this request is not marked for processing.
 when LB_SELECTED {
-    if { $processRequest == 0} { return }
+        if { $processRequest == 0} { return }
     
     if {[catch {
         set z1_request_data(pool) [LB::server]
@@ -329,6 +338,7 @@ when LB_SELECTED {
         log local0.error "Error in LB_SELECTED: $err"
     }
 }
+
 ## Exit gracefully if this request is not marked for processing.
 when HTTP_RESPONSE {
     if { $processRequest == 0} { return }
@@ -376,7 +386,7 @@ when HTTP_RESPONSE {
             lappend msg_parts "\"sensitiveDataTypes\":\"$types\""
             lappend msg_parts "\"sensitiveInPayload\":$z1_request_data(sensitive_in_payload)"
             lappend msg_parts "\"payloadType\":\"$z1_request_data(payload_type)\""
-             # Construct the final message with proper JSON formatting
+            # Construct the final message with proper JSON formatting
             set msg_json "\{[join $msg_parts ,]\}"
             set final_message "<118>1 $timestamp [info hostname] F5-API-Discovery - - - $msg_json\n"
             

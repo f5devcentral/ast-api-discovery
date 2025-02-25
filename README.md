@@ -30,7 +30,7 @@ analysis system, running on-prem. The analysis system consists of:
 ### Prerequisites
 
   * Linux system with docker (or compatible) - [Installation Instructions](https://docs.docker.com/engine/install/)
-  * BigIP with logging iRule (contact your F5 Team for access)
+  * BigIP with logging iRule on your virtual server
   * Network connectivity (default TCP port 6514) between the BigIP and instance running LADT
 
 #### System Recommendations
